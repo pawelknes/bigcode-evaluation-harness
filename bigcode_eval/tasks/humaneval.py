@@ -45,6 +45,7 @@ class GeneralHumanEval(Task):
     answers, generation settings and evaluation methods.
     """
 
+    LANGUAGE = "python"
     DATASET_PATH = "openai_humaneval"
 
     def __init__(self, strip_prompt, k=[1, 10, 100], num_workers=16, timeout=3.0):
@@ -95,11 +96,12 @@ class GeneralHumanEval(Task):
         :param references: list(str)
             list of str containing refrences
         """
-        results, _ = compute_code_eval(
+        results, _, execution_env = compute_code_eval(
             references=references,
             predictions=generations,
             k=self.k,
             num_workers=self.num_workers,
             timeout=self.timeout,
+            language="python",
         )
-        return results
+        return {**results, "language": self.LANGUAGE, "execution_env": execution_env}

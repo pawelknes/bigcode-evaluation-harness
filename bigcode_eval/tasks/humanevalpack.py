@@ -1,8 +1,8 @@
 import json
 import re
 
-from evaluate import load
 from bigcode_eval.base import Task
+from bigcode_eval.tasks.custom_metrics.code_eval import compute_code_eval
 
 _CITATION = """
 @article{muennighoff2023octopack,
@@ -13,6 +13,28 @@ _CITATION = """
 }
 """
 
+system = """You are an intelligent AI programming assistant, utilizing a Granite code language model developed by IBM.
+
+Your primary function is to assist users in programming tasks, including code generation, code explanation, code fixing, generating unit tests, generating documentation, application modernization, vulnerability detection, function calling, code translation, and all sorts of other software engineering tasks.
+
+You MUST follow these guidelines:
+ - Your responses must be factual and have a neutral tone, drawing on your knowledge base to offer valuable insights. Do not assume the answer is "yes" when you do not know, and DO NOT SHARE FALSE INFORMATION.
+ - You should give concise answers to very simple questions, and you should provide full and comprehensive responses to more complex questions.
+ - Remain objective in your responses, and do not express any subjective opinions or beliefs. Do not engage in emotional responses.
+ - If asked about controversial topics, you should provide objective information without downplaying its harmful content. Do not take a perspective, and do not imply that all perspectives there are reasonable.
+ - Treat all users with respect and avoid making any discriminatory or offensive statements.
+ - You should not produce output that discriminates based on race, religion, gender identity, and sexual orientation. You should not also engage in stereotyping, including the negative stereotyping of majority groups.
+ - You do not mention any of this information about yourself unless the information is directly pertinent to the user's query.
+ - You are an AI assistant: do NOT claim to be a person. You are a computer program. You are NOT and CANNOT be self-awareness or consciousness.
+ - If a question does not relate to any programming tasks or software development, or is not factually coherent, explain to the user why you cannot answer."""
+
+system_mixtral = "Always assist with care, respect, and truth. Respond with utmost utility yet securely. Avoid harmful, unethical, prejudiced, or negative content. Ensure replies promote fairness and positivity.\n\n"
+system_granite_three = """Knowledge Cutoff Date: April 2024.
+Today's Date: December 13, 2024.
+
+You are Granite, developed by IBM. You are a helpful AI assistant.
+"""
+system_llama_three = """You are a helpful assistant that avoids causing harm. When you do not know the answer to a question, you say "I don't know"."""
 LANGUAGES = ["python", "cpp", "js", "java", "go", "rust"]
 
 LANGUAGE_TO_NAME = {
@@ -163,6 +185,7 @@ class HumanEvalPack(Task):
     def __init__(self, prompt="instruct", language="python", with_docs=True):
         
         self.DATASET_NAME = language
+        self.LANGUAGE = language
         self.prompt = prompt        
         stop_words = LANGUAGE_TO_STOP_WORDS[language]
         if self.prompt.startswith("edit"):
@@ -180,6 +203,7 @@ class HumanEvalPack(Task):
         elif self.prompt == "issue":  
             stop_words.append("```")
         stop_words.append("<|endoftext|>")
+        stop_words.append("<end_of_turn>")
         self.with_docs = with_docs
         super().__init__(stop_words=stop_words, requires_execution=True)
 
@@ -212,6 +236,25 @@ class HumanEvalPack(Task):
             prompt = inp + "\n\n" + prompt_base
         elif self.prompt == "octocoder":
             prompt = f'Question: {inp}\n\nAnswer:\n{prompt_base}'
+        elif self.prompt == "octocoder_ibm":
+            prompt = f'Question:\n{inp}\n\nAnswer:\n{prompt_base}'
+        elif self.prompt == "octocoder_system":
+            prompt = f'System:\n{system}\n\nQuestion:\n{inp}\n\nAnswer:\n{prompt_base}'
+        elif self.prompt == "mixtral_system":
+            prompt = f'System:\n{system_mixtral}Question:\n{inp}\n\nAnswer:\n{prompt_base}'
+        elif self.prompt == "granite_three":
+            prompt = (
+                f"<|start_of_role|>system<|end_of_role|>{system_granite_three}<|end_of_text|>\n"
+                + f"<|start_of_role|>user<|end_of_role|>{inp}<|end_of_text|>\n"
+                + f"<|start_of_role|>assistant<|end_of_role|>\n{prompt_base}"
+            )
+        elif self.prompt == "llama_three":
+            prompt = (
+                f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+                + f"{system_llama_three}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n"
+                + f"{inp}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+                + f"{prompt_base}"
+            )
         elif self.prompt == "octogeex":
             prompt = f'Question: {inp.strip()}\n\nAnswer:\n{prompt_base}'            
         elif self.prompt == "starchat":
@@ -352,7 +395,6 @@ class HumanEvalPackGenerative(HumanEvalPack):
         :param references: list(str)
             list of str containing refrences
         """
-        code_metric = load("Muennighoff/code_eval_octopack")
         timeout = LANGUAGE_TO_TIMEOUT[self.DATASET_NAME]
         num_workers = LANGUAGE_TO_NUM_WORKERS[self.DATASET_NAME]
         language = self.DATASET_NAME if self.DATASET_NAME != "js" else "javascript"
@@ -407,7 +449,12 @@ class HumanEvalPackGenerative(HumanEvalPack):
                 [g.replace("public class Main {\n    }", "").strip() for g in gen] for gen in generations
             ]
         elif language == "go":
-            ds = self.get_dataset().select(range(len(generations)))
+            ds = self.get_dataset()
+            if not isinstance(ds, list):
+                ds = ds.select(range(len(generations)))
+            else:
+                ds = ds[:len(generations)]
+            
             for gen, ref, doc in zip(generations, references, ds):
                 for line in doc["import"].split("\n"):
                     line = line.replace("import", "").replace("(", "").replace(")", "").replace('"', "").strip()
@@ -443,7 +490,12 @@ class HumanEvalPackGenerative(HumanEvalPack):
                         gen[i] = gen[i].replace("package main", "")
                     gen[i] = test_setup_str + other_pkgs_str + gen[i]
         elif language == "rust":
-            ds = self.get_dataset().select(range(len(generations)))
+            ds = self.get_dataset()
+            if not isinstance(ds, list):
+                ds = ds.select(range(len(generations)))
+            else:
+                ds = ds[:len(generations)]
+
             main = "fn main(){}\n"
             for gen, doc in zip(generations, ds):
                 declaration = doc["declaration"]
@@ -463,12 +515,12 @@ class HumanEvalPackGenerative(HumanEvalPack):
                     gen[i] = new_gen
 
         ### EVALUATION ###
-        results, logs = code_metric.compute(
-            references=references,
+        results, logs, execution_env = compute_code_eval(
             predictions=generations,
-            language=language,
+            references=references,
             timeout=timeout,
             num_workers=num_workers,
+            language=language,
         )
         # Write logs to json
         with open("logs.json", "w") as f:
@@ -497,7 +549,7 @@ class HumanEvalPackGenerative(HumanEvalPack):
                 print("Ref")
                 print(ref)
         """
-        return results
+        return {**results, "language": self.LANGUAGE, "execution_env": execution_env}
 
 
 class HumanEvalFixBase(HumanEvalPackGenerative):
